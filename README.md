@@ -206,3 +206,14 @@ scripts/         install and build scripts
 tests/           pytest suite
 Justfile         recipes
 ```
+
+## Support
+
+If you really want to support this and other projects that I am involved, you can buy me a coffee.
+
+
+
+<img src="/home/contesini/x1_projects/x1_python-logger/singleton-logger/docs/art/qr-code.png" alt="buymeacoffee" style="zoom: 25%;" />
+
+Thank you,
+And I hope you have a great day ahead.
