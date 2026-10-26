@@ -7,7 +7,9 @@ from pathlib import Path
 GIT_TIMEOUT_SECONDS : float = 30.0
 FALLBACK_NAME : str = "keyvault"
 FALLBACK_EMAIL : str = "keyvault@localhost"
-VAULT_GITIGNORE : str = "*\n!.gitignore\n!*.cpt\n"
+VAULT_GITIGNORE : str = "*\n!.gitignore\n!*.cpt\n!*.age\n"
+RAGE_IGNORE_RULE : str = "!*.age"
+CCRYPT_IGNORE_RULE : str = "!*.cpt"
 FIELD_SEPARATOR : str = "\x1f"
 
 
@@ -122,6 +124,7 @@ class Git_Store:
     """
 
     if self.is_repository():
+      self.allow_rage_files()
       return False
 
     self._git( [ "init", "--quiet" ] )
@@ -132,6 +135,30 @@ class Git_Store:
       self.commit_paths( [ ".gitignore" ], "init vault" )
 
     assert self.is_repository(), "repository creation failed"
+
+    return True
+
+  def allow_rage_files( self ) -> bool:
+    """
+    Let `.age` files through a .gitignore written before rage support.
+
+    Only a .gitignore that already carries the `!*.cpt` rule is touched.
+
+    Returns:
+      bool: True when the rule was appended and committed.
+    """
+
+    gitignore : Path = self.root / ".gitignore"
+
+    if not gitignore.is_file():
+      return False
+
+    lines : list[str] = gitignore.read_text().splitlines()
+    if CCRYPT_IGNORE_RULE not in lines or RAGE_IGNORE_RULE in lines:
+      return False
+
+    gitignore.write_text( "\n".join( lines + [ RAGE_IGNORE_RULE ] ) + "\n" )
+    self.commit_paths( [ ".gitignore" ], "allow rage files" )
 
     return True
 

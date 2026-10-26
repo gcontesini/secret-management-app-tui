@@ -41,12 +41,17 @@ def test_run_exits_for_bad_folder( tmp_path : Path ) -> None:
 
 @pytest.mark.parametrize( "use_argument", [ True, False ] )
 def test_run_starts_app(
-  use_argument : bool , tmp_path : Path , monkeypatch : pytest.MonkeyPatch
+  use_argument : bool ,
+  tmp_path : Path ,
+  monkeypatch : pytest.MonkeyPatch ,
+  capsys : pytest.CaptureFixture ,
 ) -> None:
   started : list = []
 
   class Fake_App:
-    def __init__( self , folder_ ) -> None:
+    pending_exports : list = [ "export A=b" ]
+
+    def __init__( self , folder_ , backend_ = None ) -> None:
       started.append( folder_ )
 
     def run( self ) -> None:
@@ -57,6 +62,21 @@ def test_run_starts_app(
   cli.run( [ str( tmp_path ) ] if use_argument else [] )
 
   assert started == [ tmp_path, "run" ]
+  assert "export A=b" in capsys.readouterr().out
+
+
+def test_backend_flag_parsed() -> None:
+  assert cli.parse_arguments( [ "--backend", "rage" ] ).backend == "rage"
+
+
+def test_run_exits_without_rage( monkeypatch : pytest.MonkeyPatch ) -> None:
+  def missing() -> str:
+    raise Crypto_Error( "rage was not found" )
+
+  monkeypatch.setattr( cli, "find_rage", missing )
+
+  with pytest.raises( SystemExit, match="rage was not found" ):
+    cli.run( [ "--backend", "rage" ] )
 
 
 def test_package_main_delegates( monkeypatch : pytest.MonkeyPatch ) -> None:

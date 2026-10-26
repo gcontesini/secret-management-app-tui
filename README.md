@@ -29,6 +29,10 @@ KeyVault is a terminal application that manages secrets stored as `ccrypt` encry
 - Commits every new encrypted file with the file name as commit message.
 - Shows the git history of a file and displays any older version decrypted.
 - Deletes a file only after the user types the exact file name.
+- Switches the encryption backend between `ccrypt` and `rage`.
+- Copies the secret panel to the clipboard and pastes the clipboard into a new secret.
+- Exports a decrypted secret to a local `.env` file or as a temporary `export` command.
+- Shows and changes the mode and the owner and the group of files.
 
 ## Requirements
 
@@ -38,6 +42,7 @@ KeyVault is a terminal application that manages secrets stored as `ccrypt` encry
 | uv | 0.11 or newer | Environment and dependency management |
 | git | 2.x | Local version history |
 | ccrypt | 1.11 | Encryption |
+| rage | any | Optional second backend. Install from <https://github.com/str4d/rage>. |
 | just | 1.x | Optional. Runs the recipes in `Justfile`. |
 
 ## Installation
@@ -90,8 +95,15 @@ The folder listing is not recursive. Sub folders are not listed. Hidden files ar
 | `n` | Create a new secret. `Ctrl+S` saves the dialog. |
 | `x` | Delete the file under the cursor |
 | `h` | Show the version history of the file under the cursor |
-| `l` | Forget the cached password and clear the bottom panel |
+| `F2` | Rename the file under the cursor |
+| `m` | Change mode and owner and group of the marked files or the file under the cursor |
+| `t` | Export the decrypted secret under the cursor |
+| `b` | Switch the backend for new files between `ccrypt` and `rage` |
+| `l` | Lock session: forget the cached password and clear the bottom panel |
 | `r` | Reload the file list |
+| `Ctrl+C` | Copy the bottom panel to the clipboard. Inside a text field it copies the selection. |
+| `Ctrl+V` | Open the new secret dialog filled with the clipboard. Inside a text field it pastes. |
+| `Ctrl+P` | Command palette. Not listed in the footer or the `MENU` bar. |
 | `q` | Quit |
 
 ## Behaviour of each operation
@@ -108,9 +120,22 @@ The folder listing is not recursive. Sub folders are not listed. Hidden files ar
 
 **New secret.** The typed text is encrypted through a pipe. The result is saved as `.<name>.cpt` and committed with the file name as message. Existing files are never overwritten.
 
+**Rename.** `F2` asks for the new name. Encrypted files keep the leading dot and the suffix. A tracked file is renamed with a commit named `rename <old> to <new>`. The history of the new name starts at that commit. Earlier versions stay in git under the old name. KeyVault never overwrites an existing file.
+
 **Delete.** A dialog requires the exact file name. The Delete button stays disabled until the typed text matches. Deleting a tracked file creates a commit named `delete <file>`. The earlier versions remain in the git history.
 
 **History.** The list shows commit hash and date and message of every commit that touched `.<name>.cpt`. `Enter` on a row decrypts that version into the bottom panel. The password of the old version can differ from the current password.
+
+**Backends.** `ccrypt` writes `.name.cpt` files. `rage` writes `.name.age` files. The key `b` changes the backend for new files. Existing files keep their own format because KeyVault reads the suffix. `--backend rage` selects the backend at start. The last choice is stored in `~/.config/keyvault/state.json`. rage reads passphrases from a terminal only. KeyVault gives the rage process a private pseudo terminal and types the passphrase into it. This works on Linux and macOS and is not available on Windows. The backend was tested against a stand-in program because rage was not installed on the development machine.
+
+**Clipboard.** KeyVault uses `wl-copy` or `xclip` or `xsel` or `pbcopy` when present and OSC 52 otherwise. The bottom panel holds decrypted text. The clipboard keeps that text until it is overwritten.
+
+**Permissions.** The `m` dialog runs `chmod` with an octal mode and `chown` with an owner and a group. Empty fields stay unchanged. Changing the owner usually requires root. Changing the group requires membership in the target group. The table shows mode and `owner:group` for every file.
+
+**Export.** The `t` dialog asks for the variable name and for the format.
+
+- `.env`: sets `NAME="value"` in `.env` of the current directory and replaces an earlier line of the same variable. The file receives mode 600.
+- `export`: a child process cannot change the environment of its parent shell. Start KeyVault as `eval "$(keyvault)"`. KeyVault prints the `export NAME='value'` line to stdout when it quits and the shell applies it to the current session only. The terminal interface is drawn on stderr and is unaffected. When stdout is a terminal KeyVault copies the line to the clipboard instead and prints nothing.
 
 ## Colors
 
@@ -161,6 +186,7 @@ The tests call the real `ccrypt` and `git` programs. The TUI tests use the Textu
 - The bottom panel keeps decrypted text in memory. Press `l` to clear it.
 - Removed plaintext files are unlinked and not overwritten. Journaling file systems and SSD wear leveling can keep copies of the data.
 - Deleting a file does not remove its history. The encrypted versions stay in `.git`.
+- rage receives the passphrase through a pseudo terminal. It is not part of the command line.
 - `ccrypt` uses Rijndael with a 256 bit block size. Password strength limits the security of every secret.
 
 ## Project layout
@@ -171,7 +197,9 @@ src/keyvault/
   screens.py     dialogs for password and new secret and delete and history and folder
   vault.py       folder operations
   git_store.py   local git operations
-  crypto.py      ccrypt wrapper
+  crypto.py      ccrypt and rage wrappers
+  exports.py     `.env` and `export` formatting
+  clipboard.py   system clipboard access
   config.py      palette and last folder
   cli.py         command line entry point
 scripts/         install and build scripts

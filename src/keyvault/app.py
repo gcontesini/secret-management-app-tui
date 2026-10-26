@@ -1,24 +1,49 @@
 """Textual application that manages a folder of ccrypt secrets."""
 
+import sys
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from rich.text import Text
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
+from textual.screen import Screen
 from textual.theme import Theme
 from textual.widgets import DataTable, Footer, Header, RichLog, Static
 
-from keyvault.config import load_palette, save_last_folder
-from keyvault.crypto import Crypto_Error, Wrong_Password_Error
+from keyvault import clipboard
+from keyvault.config import (
+  load_backend,
+  load_palette,
+  save_backend,
+  save_last_folder,
+)
+from keyvault.crypto import (
+  BACKEND_CCRYPT,
+  BACKEND_RAGE,
+  BACKEND_SUFFIXES,
+  Crypto_Error,
+  Wrong_Password_Error,
+  find_ccrypt,
+  find_rage,
+)
+from keyvault.exports import (
+  Export_Error,
+  format_export_line,
+  validate_variable_name,
+  write_env_variable,
+)
 from keyvault.git_store import Git_Error, Revision
 from keyvault.screens import (
   Add_Secret_Screen,
   Delete_Screen,
+  Export_Screen,
   Folder_Screen,
   History_Screen,
   Password_Screen,
+  Permissions_Screen,
+  Rename_Screen,
 )
 from keyvault.vault import Entry, Vault, Vault_Error
 
@@ -34,12 +59,25 @@ MENU_ITEMS : tuple[tuple[str, str], ...] = (
   ( "n", "New" ),
   ( "x", "Delete" ),
   ( "h", "History" ),
-  ( "l", "Lock" ),
+  ( "f2", "Rename" ),
+  ( "m", "Permissions" ),
+  ( "t", "Export" ),
+  ( "b", "Backend" ),
+  ( "l", "Lock session" ),
   ( "r", "Refresh" ),
+  ( "ctrl+c", "Copy" ),
+  ( "ctrl+v", "Paste" ),
   ( "q", "Quit" ),
 )
 THEME_NAME : str = "keyvault"
-HANDLED_ERRORS : tuple = ( Crypto_Error, Git_Error, Vault_Error, OSError )
+HANDLED_ERRORS : tuple = (
+  Crypto_Error,
+  Git_Error,
+  Vault_Error,
+  Export_Error,
+  OSError,
+)
+QUIT_DESCRIPTION : str = "Quit the application"
 
 
 def build_menu(
@@ -108,7 +146,7 @@ class Key_Vault_App( App ):
   TITLE : str = "KeyVault"
   CSS : str = """
   #menubar {
-    height: 1;
+    height: auto;
     width: 100%;
   }
   #entries {
@@ -130,8 +168,14 @@ class Key_Vault_App( App ):
     Binding( "n", "new_secret", "New" ),
     Binding( "x", "delete", "Delete" ),
     Binding( "h", "history", "History" ),
-    Binding( "l", "lock", "Lock" ),
+    Binding( "f2", "rename", "Rename" ),
+    Binding( "m", "permissions", "Permissions" ),
+    Binding( "t", "export", "Export" ),
+    Binding( "b", "switch_backend", "Backend" ),
+    Binding( "l", "lock", "Lock session" ),
     Binding( "r", "refresh", "Refresh" ),
+    Binding( "ctrl+c", "copy_panel", "Copy" ),
+    Binding( "ctrl+v", "paste_secret", "Paste" ),
     Binding( "q", "quit", "Quit" ),
   ]
 
@@ -139,14 +183,19 @@ class Key_Vault_App( App ):
     self ,
     folder_ : Optional[Path] = None ,
     palette_ : Optional[dict[str, str]] = None ,
+    backend_ : Optional[str] = None ,
   ) -> None:
     """
     Args:
       folder_ (Path, optional): Secrets folder. A picker opens when None.
       palette_ (dict, optional): Colors. Loaded from the config when None.
+      backend_ (str, optional): `ccrypt` or `rage`. The last used backend
+        is loaded from the state file when None.
     """
 
     super().__init__()
+    self.backend : str = backend_ or load_backend()
+    self.pending_exports : list[str] = []
     self.palette : dict[str, str] = palette_ or load_palette()
     self.initial_folder : Optional[Path] = folder_
     self.vault : Optional[Vault] = None
@@ -163,7 +212,36 @@ class Key_Vault_App( App ):
     yield RichLog(
       wrap=True, markup=False, highlight=False, id="secret-panel"
     )
-    yield Footer()
+    yield Footer( show_command_palette=False )
+
+  def get_system_commands(
+    self ,
+    screen : Screen ,
+  ) -> Iterable[SystemCommand]:
+    """Offer the default palette commands with a shorter Quit help text."""
+
+    for command in super().get_system_commands( screen ):
+      if command.title == "Quit":
+        yield SystemCommand( "Quit", QUIT_DESCRIPTION, self.action_quit )
+      else:
+        yield command
+
+  @property
+  def clipboard( self ) -> str:
+    """System clipboard when readable and the in-app clipboard otherwise."""
+
+    system_text : Optional[str] = clipboard.read_text()
+
+    return system_text if system_text is not None else self._clipboard
+
+  def copy_to_clipboard(
+    self ,
+    text_ : str ,
+  ) -> None:
+    """Copy through OSC 52 and through the clipboard tools of the host."""
+
+    super().copy_to_clipboard( text_ )
+    clipboard.copy_text( text_ )
 
   def on_mount( self ) -> None:
     """Apply the theme and open the initial folder."""
@@ -172,7 +250,9 @@ class Key_Vault_App( App ):
     self.theme = THEME_NAME
 
     table : DataTable = self.query_one( "#entries", DataTable )
-    table.add_columns( " ", "Name", "State", "Size", "Modified" )
+    table.add_columns(
+      " ", "Name", "State", "Size", "Modified", "Mode", "Owner:Group"
+    )
     table.focus()
 
     panel : RichLog = self.query_one( "#secret-panel", RichLog )
@@ -193,19 +273,25 @@ class Key_Vault_App( App ):
     """Open folder_ as the vault and refresh the view."""
 
     try:
-      self.vault = Vault( folder_ )
+      self.vault = Vault( folder_, self.backend )
     except HANDLED_ERRORS as error:
       self.notify( f"Cannot open {folder_}: {error}", severity="error" )
       return
 
     self.marked.clear()
     save_last_folder( self.vault.root )
-    self.sub_title = str( self.vault.root )
+    self.update_sub_title()
 
     if self.vault.created_repository:
       self.notify( "Created a local git repository in this folder." )
 
     self.action_refresh()
+
+  def update_sub_title( self ) -> None:
+    """Show the folder and the active backend in the header."""
+
+    if self.vault is not None:
+      self.sub_title = f"{self.vault.root}  [{self.backend}]"
 
   def refresh_table( self ) -> None:
     """Rebuild the file table and keep the cursor on the same file."""
@@ -227,6 +313,8 @@ class Key_Vault_App( App ):
         Text( "encrypted" if entry.encrypted else "plaintext", style=color ),
         Text( f"{entry.size} B", style=self.palette[ "muted" ] ),
         Text( entry.modified, style=self.palette[ "muted" ] ),
+        Text( entry.mode, style=self.palette[ "muted" ] ),
+        Text( f"{entry.owner}:{entry.group}", style=self.palette[ "muted" ] ),
         key=entry.name,
       )
 
@@ -437,14 +525,19 @@ class Key_Vault_App( App ):
     self.refresh_table()
 
   @work
-  async def action_new_secret( self ) -> None:
+  async def action_new_secret(
+    self ,
+    initial_secret_ : str = "" ,
+  ) -> None:
     """Create a new encrypted secret and commit it."""
 
     if self.vault is None:
       return
 
     answer : Optional[tuple[str, str]] = await self.push_screen_wait(
-      Add_Secret_Screen()
+      Add_Secret_Screen(
+        secret_=initial_secret_, suffix_=BACKEND_SUFFIXES[ self.backend ]
+      )
     )
     if answer is None:
       return
@@ -485,6 +578,35 @@ class Key_Vault_App( App ):
     self.notify( f"Deleted {name}." )
 
   @work
+  async def action_rename( self ) -> None:
+    """Rename the file under the cursor."""
+
+    name : Optional[str] = self.cursor_name()
+
+    if self.vault is None or name is None:
+      return
+
+    encrypted : bool = any( e.encrypted for e in self.entries if e.name == name )
+    typed : Optional[str] = await self.push_screen_wait(
+      Rename_Screen( name, encrypted_=encrypted )
+    )
+    if typed is None:
+      return
+
+    try:
+      new_name : str = self.vault.rename_entry( name, typed )
+    except HANDLED_ERRORS as error:
+      self.report_error( error )
+      return
+
+    self.marked.discard( name )
+    self.refresh_table()
+    self.query_one( "#entries", DataTable ).move_cursor(
+      row=[ e.name for e in self.entries ].index( new_name )
+    )
+    self.notify( f"Renamed {name} to {new_name}." )
+
+  @work
   async def action_history( self ) -> None:
     """Show git history of the file and optionally one decrypted version."""
 
@@ -520,4 +642,163 @@ class Key_Vault_App( App ):
     self.write_panel(
       f"{name} @ {chosen.short_commit} {chosen.date}",
       data.decode( errors="replace" ),
+    )
+
+  # --------------------------------------------------------------------------
+  # Clipboard, backend, permissions and export
+
+  def panel_text( self ) -> str:
+    """Return the text currently shown in the secret panel."""
+
+    panel : RichLog = self.query_one( "#secret-panel", RichLog )
+
+    return "\n".join(
+      "".join( segment.text for segment in strip ).rstrip()
+      for strip in panel.lines
+    )
+
+  def action_copy_panel( self ) -> None:
+    """Copy the secret panel to the clipboard."""
+
+    text : str = self.panel_text().strip()
+
+    if text == "":
+      self.notify( "The secret panel is empty." )
+      return
+
+    self.copy_to_clipboard( text )
+    self.notify( "Copied the secret panel to the clipboard." )
+
+  def action_paste_secret( self ) -> None:
+    """Open the new secret dialog with the clipboard as secret text."""
+
+    text : str = self.clipboard
+
+    if text == "":
+      self.notify( "The clipboard is empty." )
+      return
+
+    self.action_new_secret( text )
+
+  def action_switch_backend( self ) -> None:
+    """Toggle between ccrypt and rage for new ciphertext."""
+
+    target : str = (
+      BACKEND_RAGE if self.backend == BACKEND_CCRYPT else BACKEND_CCRYPT
+    )
+
+    try:
+      find_rage() if target == BACKEND_RAGE else find_ccrypt()
+    except Crypto_Error as error:
+      self.notify( str( error ), severity="error", timeout=8 )
+      return
+
+    self.backend = target
+    save_backend( target )
+
+    if self.vault is not None:
+      self.vault.backend = target
+    self.update_sub_title()
+    self.notify(
+      f"New files use {target} ({BACKEND_SUFFIXES[ target ]})."
+      " Existing files keep their own format."
+    )
+
+  @work
+  async def action_permissions( self ) -> None:
+    """Change mode and owner and group of the targets."""
+
+    targets : list[Entry] = self.target_entries()
+
+    if self.vault is None or len( targets ) == 0:
+      return
+
+    first : Entry = targets[ 0 ]
+    answer : Optional[tuple[str, str, str]] = await self.push_screen_wait(
+      Permissions_Screen(
+        [ entry.name for entry in targets ],
+        mode_=self.vault.octal_mode( first.name ),
+        owner_=first.owner,
+        group_=first.group,
+      )
+    )
+    if answer is None:
+      return
+
+    changed : int = 0
+    for entry in targets:
+      try:
+        self.vault.set_permissions( entry.name, *answer )
+        changed += 1
+      except HANDLED_ERRORS as error:
+        self.report_error( error )
+
+    self.refresh_table()
+    if changed > 0:
+      self.notify( f"Changed permissions of {changed} file(s)." )
+
+  @work
+  async def action_export( self ) -> None:
+    """Export the decrypted secret under the cursor as `.env` or `export`."""
+
+    name : Optional[str] = self.cursor_name()
+
+    if self.vault is None or name is None:
+      return
+
+    answer : Optional[tuple[str, str]] = await self.push_screen_wait(
+      Export_Screen( name )
+    )
+    if answer is None:
+      return
+
+    variable, kind = answer
+    try:
+      validate_variable_name( variable )
+    except HANDLED_ERRORS as error:
+      self.report_error( error )
+      return
+
+    password : Optional[str] = ""
+    if any( e.encrypted for e in self.entries if e.name == name ):
+      password = await self.request_password()
+      if password is None:
+        return
+
+    try:
+      secret : str = self.vault.read_secret( name, password ).decode(
+        errors="replace"
+      ).rstrip( "\n" )
+      if kind == Export_Screen.FORMAT_ENV:
+        target : Path = write_env_variable( Path.cwd(), variable, secret )
+        self.notify( f"Wrote {variable} to {target} (mode 600)." )
+      else:
+        self.export_to_shell( format_export_line( variable, secret ) )
+    except HANDLED_ERRORS as error:
+      self.report_error( error )
+
+  def export_to_shell(
+    self ,
+    line_ : str ,
+  ) -> None:
+    """
+    Hand an `export` line to the calling shell.
+
+    A child process cannot change the environment of its parent. When
+    stdout is captured with `eval "$(keyvault)"` the line is printed at exit.
+    Otherwise the line goes to the clipboard.
+    """
+
+    assert line_.startswith( "export " ), "line_ must be an export command"
+
+    if sys.__stdout__ is not None and not sys.__stdout__.isatty():
+      self.pending_exports.append( line_ )
+      self.notify( "The export command runs in your shell when KeyVault quits." )
+      return
+
+    self.copy_to_clipboard( line_ )
+    self.notify(
+      "Copied the export command. Start KeyVault with"
+      " eval \"$(keyvault)\" to apply it automatically.",
+      timeout=10,
     )

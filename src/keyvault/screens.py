@@ -14,6 +14,8 @@ from textual.widgets import (
   DirectoryTree,
   Input,
   Label,
+  RadioButton,
+  RadioSet,
   TextArea,
 )
 
@@ -136,13 +138,30 @@ class Add_Secret_Screen( ModalScreen[Optional[tuple[str, str]]] ):
     Binding( "ctrl+s", "save", "Save" ),
   ]
 
+  def __init__(
+    self ,
+    secret_ : str = "" ,
+    suffix_ : str = ".cpt" ,
+  ) -> None:
+    """
+    Args:
+      secret_ (str): Text the secret box starts with.
+      suffix_ (str): Encrypted suffix named in the heading.
+    """
+
+    super().__init__()
+    self.initial_secret : str = secret_
+    self.suffix : str = suffix_
+
   def compose( self ) -> ComposeResult:
     """Build the dialog."""
 
     with Vertical():
-      yield Label( "New secret. The file is stored as <name>.cpt" )
+      yield Label( f"New secret. The file is stored as <name>{self.suffix}" )
       yield Input( placeholder="file name", id="name" )
-      yield TextArea( id="secret", tab_behavior="focus" )
+      yield TextArea(
+        self.initial_secret, id="secret", tab_behavior="focus"
+      )
       yield Label( "", id="error" )
       with Horizontal():
         yield Button( "Save", variant="primary", id="save" )
@@ -314,6 +333,216 @@ class History_Screen( ModalScreen[Optional[Revision]] ):
   @on( Button.Pressed, "#cancel" )
   def action_cancel( self ) -> None:
     """Close the dialog."""
+
+    self.dismiss( None )
+
+
+class Rename_Screen( ModalScreen[Optional[str]] ):
+  """Ask for the new name of a file."""
+
+  DEFAULT_CSS : str = MODAL_CSS.format( cls="Rename_Screen" )
+  BINDINGS : list[Binding] = [ Binding( "escape", "cancel", "Cancel" ) ]
+
+  def __init__(
+    self ,
+    name_ : str ,
+    encrypted_ : bool = False ,
+  ) -> None:
+    """
+    Args:
+      name_ (str): Current file name.
+      encrypted_ (bool): Encrypted files keep their dot and suffix.
+    """
+
+    assert len( name_ ) > 0, "name_ must not be empty"
+
+    super().__init__()
+    self.current_name : str = name_
+    self.encrypted : bool = encrypted_
+
+  def compose( self ) -> ComposeResult:
+    """Build the dialog."""
+
+    hint : str = (
+      " The leading dot and the suffix are kept." if self.encrypted else ""
+    )
+
+    with Vertical():
+      yield Label( f"Rename {self.current_name}.{hint}" )
+      yield Input( value=self.current_name, id="new-name" )
+      yield Label( "", id="error" )
+      with Horizontal():
+        yield Button( "Rename", variant="primary", id="rename" )
+        yield Button( "Cancel", id="cancel" )
+
+  def on_mount( self ) -> None:
+    """Focus the input."""
+
+    self.query_one( "#new-name", Input ).focus()
+
+  @on( Input.Submitted )
+  @on( Button.Pressed, "#rename" )
+  def _on_rename( self ) -> None:
+    """Close with the typed name when it is not empty."""
+
+    typed : str = self.query_one( "#new-name", Input ).value.strip()
+
+    if typed == "":
+      self.query_one( "#error", Label ).update( "Name is required." )
+      return
+
+    self.dismiss( typed )
+
+  @on( Button.Pressed, "#cancel" )
+  def action_cancel( self ) -> None:
+    """Close without renaming."""
+
+    self.dismiss( None )
+
+
+class Permissions_Screen(
+  ModalScreen[Optional[tuple[str, str, str]]]
+):
+  """Edit the mode and the owner and the group of files (chmod and chown)."""
+
+  DEFAULT_CSS : str = MODAL_CSS.format( cls="Permissions_Screen" )
+  BINDINGS : list[Binding] = [ Binding( "escape", "cancel", "Cancel" ) ]
+
+  def __init__(
+    self ,
+    names_ : list[str] ,
+    mode_ : str = "600" ,
+    owner_ : str = "" ,
+    group_ : str = "" ,
+  ) -> None:
+    """
+    Args:
+      names_ (list[str]): Files that receive the change.
+      mode_ (str): Octal mode shown in the mode input.
+      owner_ (str): Current owner shown as placeholder.
+      group_ (str): Current group shown as placeholder.
+    """
+
+    assert len( names_ ) > 0, "names_ must not be empty"
+
+    super().__init__()
+    self.names : list[str] = names_
+    self.initial_mode : str = mode_
+    self.current_owner : str = owner_
+    self.current_group : str = group_
+
+  def compose( self ) -> ComposeResult:
+    """Build the dialog."""
+
+    subject : str = (
+      self.names[ 0 ]
+      if len( self.names ) == 1
+      else f"{len( self.names )} files"
+    )
+
+    with Vertical():
+      yield Label( f"Permissions of {subject}. Empty fields stay unchanged." )
+      yield Label( "Mode (octal, for example 600):" )
+      yield Input( value=self.initial_mode, id="mode" )
+      yield Label( "Owner (name or id, usually needs root):" )
+      yield Input( placeholder=self.current_owner, id="owner" )
+      yield Label( "Group (name or id):" )
+      yield Input( placeholder=self.current_group, id="group" )
+      yield Label( "", id="error" )
+      with Horizontal():
+        yield Button( "Apply", variant="primary", id="apply" )
+        yield Button( "Cancel", id="cancel" )
+
+  def on_mount( self ) -> None:
+    """Focus the mode input."""
+
+    self.query_one( "#mode", Input ).focus()
+
+  @on( Input.Submitted )
+  @on( Button.Pressed, "#apply" )
+  def _on_apply( self ) -> None:
+    """Close the dialog with the three typed values."""
+
+    mode : str = self.query_one( "#mode", Input ).value.strip()
+    owner : str = self.query_one( "#owner", Input ).value.strip()
+    group : str = self.query_one( "#group", Input ).value.strip()
+
+    if mode == "" and owner == "" and group == "":
+      self.query_one( "#error", Label ).update( "Nothing to change." )
+      return
+
+    self.dismiss( ( mode, owner, group ) )
+
+  @on( Button.Pressed, "#cancel" )
+  def action_cancel( self ) -> None:
+    """Close without changes."""
+
+    self.dismiss( None )
+
+
+class Export_Screen( ModalScreen[Optional[tuple[str, str]]] ):
+  """Ask for the variable name and for the export format."""
+
+  DEFAULT_CSS : str = MODAL_CSS.format( cls="Export_Screen" )
+  BINDINGS : list[Binding] = [ Binding( "escape", "cancel", "Cancel" ) ]
+  FORMAT_ENV : str = "env"
+  FORMAT_EXPORT : str = "export"
+
+  def __init__(
+    self ,
+    file_name_ : str ,
+    default_name_ : str = "" ,
+  ) -> None:
+    """
+    Args:
+      file_name_ (str): Secret that is exported.
+      default_name_ (str): Suggested variable name.
+    """
+
+    super().__init__()
+    self.file_name : str = file_name_
+    self.default_name : str = default_name_
+
+  def compose( self ) -> ComposeResult:
+    """Build the dialog."""
+
+    with Vertical():
+      yield Label( f"Export the decrypted secret of {self.file_name}." )
+      yield Label( "Variable name (name_secret):" )
+      yield Input( value=self.default_name, id="variable" )
+      yield RadioSet(
+        RadioButton( ".env file in the current directory", value=True ),
+        RadioButton( "export command for the bash environment" ),
+        id="format",
+      )
+      yield Label( "", id="error" )
+      with Horizontal():
+        yield Button( "Export", variant="primary", id="export" )
+        yield Button( "Cancel", id="cancel" )
+
+  def on_mount( self ) -> None:
+    """Focus the name input."""
+
+    self.query_one( "#variable", Input ).focus()
+
+  @on( Input.Submitted )
+  @on( Button.Pressed, "#export" )
+  def _on_export( self ) -> None:
+    """Close the dialog with the name and the chosen format."""
+
+    variable : str = self.query_one( "#variable", Input ).value.strip()
+    chosen : int = self.query_one( "#format", RadioSet ).pressed_index
+    kind : str = self.FORMAT_ENV if chosen <= 0 else self.FORMAT_EXPORT
+
+    if variable == "":
+      self.query_one( "#error", Label ).update( "Variable name is required." )
+      return
+
+    self.dismiss( ( variable, kind ) )
+
+  @on( Button.Pressed, "#cancel" )
+  def action_cancel( self ) -> None:
+    """Close without exporting."""
 
     self.dismiss( None )
 

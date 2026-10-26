@@ -203,3 +203,59 @@ def test_encrypt_hides_visible_plaintext( secrets_dir : Path ) -> None:
 
   assert vault.encrypt_entry( "visible.txt", "pw" ) == ".visible.txt.cpt"
   assert vault.history( "visible.txt" )[ 0 ].message == ".visible.txt.cpt"
+
+
+def test_octal_mode_and_chmod( secrets_dir : Path ) -> None:
+  vault : Vault = Vault( secrets_dir )
+  ( secrets_dir / "f" ).write_text( "x" )
+
+  vault.set_permissions( "f", "640" )
+
+  assert vault.octal_mode( "f" ) == "640"
+  assert vault.list_entries()[ 0 ].mode == "-rw-r-----"
+
+
+@pytest.mark.parametrize( "mode", [ "9", "abc", "12345", "-1" ] )
+def test_chmod_rejects_bad_mode( secrets_dir : Path , mode : str ) -> None:
+  vault : Vault = Vault( secrets_dir )
+  ( secrets_dir / "f" ).write_text( "x" )
+
+  with pytest.raises( Vault_Error ):
+    vault.set_permissions( "f", mode )
+
+
+def test_chown_current_group_and_unknown_group( secrets_dir : Path ) -> None:
+  import grp
+  import os
+
+  vault : Vault = Vault( secrets_dir )
+  ( secrets_dir / "f" ).write_text( "x" )
+  own_group : str = grp.getgrgid( os.getgid() ).gr_name
+
+  vault.set_permissions( "f", None, "", own_group )
+
+  with pytest.raises( Vault_Error ):
+    vault.set_permissions( "f", None, "", "no_such_group_keyvault" )
+
+
+def test_chown_other_owner_refused_for_non_root( secrets_dir : Path ) -> None:
+  import os
+
+  if os.geteuid() == 0:
+    pytest.skip( "root may change the owner" )
+
+  vault : Vault = Vault( secrets_dir )
+  ( secrets_dir / "f" ).write_text( "x" )
+
+  with pytest.raises( Vault_Error ):
+    vault.set_permissions( "f", None, "root" )
+
+
+def test_set_permissions_missing_file( secrets_dir : Path ) -> None:
+  with pytest.raises( Vault_Error ):
+    Vault( secrets_dir ).set_permissions( "nope", "600" )
+
+
+def test_unknown_backend_rejected( secrets_dir : Path ) -> None:
+  with pytest.raises( Vault_Error ):
+    Vault( secrets_dir, "gpg" )
